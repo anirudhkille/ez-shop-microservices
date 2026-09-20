@@ -1,0 +1,352 @@
+import jwt, { type JwtPayload } from "jsonwebtoken";
+import { env } from "../config/env.config";
+import {
+  generateAccessToken,
+  generateRefreshToken,
+} from "../utils/generateToken";
+import { generateOtp } from "../utils/generateOtp";
+import { sendEmail } from "../utils/sendEmail";
+import { resetPasswordTemplate } from "../templates/resetEmailTemplate";
+import { verifyEmailTemplate } from "../templates/verifyEmailTemplate";
+import Session from "./session..model";
+import { AppError } from "../utils/appError";
+import * as authRepository from "../repository/auth.repository";
+import { IUser } from "../types/auth.types";
+
+const REFRESH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+const saveRefreshSession = async (userId: string, refreshToken: string) => {
+  await Session.findOneAndUpdate(
+    { key: `refresh:${userId}` },
+    {
+      value: refreshToken,
+      expiresAt: new Date(Date.now() + REFRESH_TTL_MS),
+    },
+    { upsert: true, new: true },
+  );
+};
+
+export const signUp = async (email: string, password: string) => {
+  const userExists = await authRepository.findByEmail(email);
+  if (userExists) {
+    throw new AppError("Email already registered", 409);
+  }
+
+  const otp = generateOtp();
+
+  await Session.create({
+    key: `signup:${email}`,
+    value: JSON.stringify({ email, password, otp }),
+    expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+  });
+
+  await sendEmail({
+    to: email,
+    subject: "Verify Your Email",
+    html: verifyEmailTemplate(email, otp),
+  });
+
+  return { message: "OTP sent to email" };
+};
+
+export const verifySignupOTP = async (email: string, otp: string) => {
+  const session = await Session.findOne({ key: `signup:${email}` });
+
+  if (!session) {
+    throw new AppError("OTP expired", 400);
+  }
+
+  const data = JSON.parse(session.value) as {
+    email: string;
+    otp: string;
+    password: string;
+  };
+
+  if (data.otp !== otp) {
+    throw new AppError("Invalid OTP", 400);
+  }
+
+  const newUser = await authRepository.createUser({
+    email: data.email,
+    password: data.password,
+    isEmailVerified: true,
+  });
+
+  await session.deleteOne();
+
+  const accessToken = generateAccessToken({
+    _id: String(newUser._id),
+    role: newUser.role,
+  });
+  const refreshToken = generateRefreshToken({
+    _id: String(newUser._id),
+    role: newUser.role,
+  });
+
+  await saveRefreshSession(String(newUser._id), refreshToken);
+
+  return {
+    accessToken,
+    refreshToken,
+    user: {
+      id: newUser._id,
+      name: newUser.name,
+      email: newUser.email,
+    },
+  };
+};
+
+export const login = async (email: string, password: string) => {
+  const user = await authRepository.findByEmail(email);
+
+  if (!user || !(await user.matchPassword(password))) {
+    throw new AppError("Invalid credentials", 401);
+  }
+
+  const accessToken = generateAccessToken({
+    _id: String(user._id),
+    role: user.role,
+  });
+  const refreshToken = generateRefreshToken({
+    _id: String(user._id),
+    role: user.role,
+  });
+
+  await saveRefreshSession(String(user._id), refreshToken);
+
+  return {
+    accessToken,
+    refreshToken,
+    user: {
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+    },
+  };
+};
+
+export const forgotPassword = async (email: string) => {
+  const user = await authRepository.findByEmail(email);
+
+  if (!user) {
+    throw new AppError("User not found", 404);
+  }
+
+  const otp = generateOtp();
+
+  await Session.create({
+    key: `reset:${email}`,
+    value: otp,
+    expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+  });
+
+  await sendEmail({
+    to: email,
+    subject: "Reset Password - EZ Shop",
+    html: resetPasswordTemplate(user.name || "User", otp),
+  });
+
+  return { message: "Reset OTP sent" };
+};
+
+export const resetPassword = async (
+  email: string,
+  otp: string,
+  newPassword: string,
+) => {
+  const session = await Session.findOne({ key: `reset:${email}` });
+
+  if (!session || session.value !== otp) {
+    throw new AppError("Invalid or expired OTP", 400);
+  }
+
+  const user = await authRepository.findByEmail(email);
+
+  if (!user) {
+    throw new AppError("User not found", 404);
+  }
+
+  user.password = newPassword;
+  await user.save();
+  await session.deleteOne();
+
+  return { message: "Password reset successful" };
+};
+
+export const getProfile = async (userId: string) => {
+  const user = await authRepository.findById(userId, "-password");
+
+  if (!user) {
+    throw new AppError("User not found", 404);
+  }
+
+  return { user };
+};
+
+export const updatePassword = async (
+  userId: string,
+  currentPassword: string,
+  newPassword: string,
+) => {
+  const user = await authRepository.findById(userId);
+
+  if (!user) {
+    throw new AppError("User not found", 404);
+  }
+
+  if (!user.password) {
+    throw new AppError("Cannot change password for OAuth accounts", 400);
+  }
+
+  const isMatch = await user.matchPassword(currentPassword);
+  if (!isMatch) {
+    throw new AppError("Current password is incorrect", 400);
+  }
+
+  user.password = newPassword;
+  await user.save();
+
+  return { message: "Password updated successfully" };
+};
+
+type ProfileUpdateInput = Partial<Pick<IUser, "name" | "phone" | "avatar">>;
+
+export const updateProfile = async (
+  userId: string,
+  updates: ProfileUpdateInput,
+) => {
+  const allowedFields = ["name", "phone", "avatar"] as const;
+  const sanitized: ProfileUpdateInput = {};
+
+  for (const field of allowedFields) {
+    if (updates[field] !== undefined) sanitized[field] = updates[field];
+  }
+
+  const user = await authRepository.findByIdAndUpdate(userId, sanitized);
+
+  if (!user) {
+    throw new AppError("User not found", 404);
+  }
+
+  return { user };
+};
+
+export const refreshToken = async (token: string) => {
+  if (!token) {
+    throw new AppError("No refresh token", 401);
+  }
+
+  let decoded: JwtPayload;
+  try {
+    decoded = jwt.verify(token, env.JWT_REFRESH_SECRET) as JwtPayload;
+  } catch {
+    throw new AppError("Invalid refresh token", 403);
+  }
+
+  const session = await Session.findOne({ key: `refresh:${decoded._id}` });
+
+  if (!session || session.value !== token) {
+    throw new AppError("Refresh token mismatch", 403);
+  }
+
+  const newRefreshToken = generateRefreshToken(
+    decoded as unknown as { _id: string; role: string },
+  );
+  const newAccessToken = generateAccessToken(
+    decoded as unknown as { _id: string; role: string },
+  );
+
+  session.value = newRefreshToken;
+  session.expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  await session.save();
+
+  return { accessToken: newAccessToken, refreshToken: newRefreshToken };
+};
+
+export const logout = async (token: string) => {
+  if (token) {
+    try {
+      const decoded = jwt.verify(token, env.JWT_REFRESH_SECRET) as JwtPayload;
+      await Session.findOneAndDelete({ key: `refresh:${decoded._id}` });
+    } catch {
+      // ignore
+    }
+  }
+
+  return { message: "Logged out successfully" };
+};
+
+export const getAllUsers = async (page = 1, limit = 10) => {
+  const skip = (page - 1) * limit;
+
+  const [users, total] = await Promise.all([
+    authRepository.findAll(skip, limit, "-password"),
+    authRepository.countDocuments(),
+  ]);
+
+  return {
+    users,
+    pagination: {
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    },
+  };
+};
+
+export const getUserById = async (id: string) => {
+  const user = await authRepository.findById(id, "-password");
+
+  if (!user) {
+    throw new AppError("User not found", 404);
+  }
+
+  return { user };
+};
+
+export const deleteUserById = async (id: string) => {
+  const user = await authRepository.deleteById(id);
+
+  if (!user) {
+    throw new AppError("User not found", 404);
+  }
+
+  return { message: "User deleted successfully" };
+};
+
+export const googleLogin = async (googleUser: {
+  email?: string;
+  name?: string;
+  googleId: string;
+  avatar?: string;
+}) => {
+  if (!googleUser || !googleUser.email) {
+    throw new AppError("Invalid Google user data", 400);
+  }
+
+  let user = await authRepository.findByEmail(googleUser.email);
+
+  if (!user) {
+    user = await authRepository.createUser({
+      name: googleUser.name,
+      email: googleUser.email,
+      googleId: googleUser.googleId,
+      avatar: googleUser.avatar,
+    });
+  }
+
+  const accessToken = generateAccessToken({
+    _id: String(user._id),
+    role: user.role,
+  });
+  const refreshToken = generateRefreshToken({
+    _id: String(user._id),
+    role: user.role,
+  });
+
+  await saveRefreshSession(String(user._id), refreshToken);
+
+  return { accessToken, refreshToken, user };
+};
