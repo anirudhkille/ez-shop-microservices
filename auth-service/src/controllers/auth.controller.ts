@@ -60,7 +60,7 @@ export const resetPassword = asyncHandler(
 );
 
 export const getProfile = asyncHandler(async (req: Request, res: Response) => {
-  const result = await authService.getProfile(req.user!._id);
+  const result = await authService.getProfile(req.user!.id);
   sendSuccess(res, result.user);
 });
 
@@ -68,7 +68,7 @@ export const updatePassword = asyncHandler(
   async (req: Request, res: Response) => {
     const { currentPassword, newPassword } = req.body;
     const result = await authService.updatePassword(
-      req.user!._id,
+      req.user!.id,
       currentPassword,
       newPassword,
     );
@@ -78,7 +78,7 @@ export const updatePassword = asyncHandler(
 
 export const updateProfile = asyncHandler(
   async (req: Request, res: Response) => {
-    const result = await authService.updateProfile(req.user!._id, req.body);
+    const result = await authService.updateProfile(req.user!.id, req.body);
     sendSuccess(res, result.user);
   },
 );
@@ -113,13 +113,13 @@ export const getAllUsers = asyncHandler(
   },
 );
 
-export const getUserById = asyncHandler(async (req: Request, res: Response) => {
+export const getUserById = asyncHandler(async ( req: Request<{ id: string }>, res: Response) => {
   const result = await authService.getUserById(req.params.id);
   sendSuccess(res, result.user);
 });
 
 export const deleteUserById = asyncHandler(
-  async (req: Request, res: Response) => {
+  async ( req: Request<{ id: string }>, res: Response) => {
     const result = await authService.deleteUserById(req.params.id);
     sendMessage(res, result.message);
   },

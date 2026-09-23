@@ -31,9 +31,10 @@ export const protect = asyncHandler(
     const user = await loadUser(req);
 
     if (!user) {
-      return res
+       res
         .status(401)
         .json({ success: false, message: "Not authorized, no token" });
+        return
     }
 
     req.user = user as unknown as Express.User;

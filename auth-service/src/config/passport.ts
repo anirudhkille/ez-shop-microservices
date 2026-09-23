@@ -1,7 +1,14 @@
 import passport from "passport";
 import { Strategy as GoogleStrategy } from "passport-google-oauth20";
+import type { User as PrismaUser } from "@prisma/client";
 import { env } from "../config/env.config";
 import * as authRepository from "../repository/auth.repository";
+
+declare global {
+  namespace Express {
+    interface User extends PrismaUser {}
+  }
+}
 
 passport.use(
   new GoogleStrategy(
@@ -10,23 +17,28 @@ passport.use(
       clientSecret: env.GOOGLE_CLIENT_SECRET,
       callbackURL: env.GOOGLE_CALLBACK_URL,
     },
-    async (accessToken, refreshToken, profile, done) => {
+    async (_accessToken, _refreshToken, profile, done) => {
       try {
-        let user = await authRepository.findByEmail(profile.emails?.[0].value);
+        const email = profile.emails?.[0]?.value;
+        if (!email) {
+          return done(new Error("Google account has no email address"));
+        }
+
+        let user = await authRepository.findByEmail(email);
 
         if (!user) {
           user = await authRepository.createUser({
             googleId: profile.id,
             name: profile.displayName,
-            email: profile.emails?.[0].value,
-            avatar: profile.photos?.[0].value,
+            email,
+            avatar: profile.photos?.[0]?.value,
             password: null,
           });
         }
 
-        return done(null, user as unknown as Express.User);
+        return done(null, user);
       } catch (err) {
-        done(err);
+        return done(err as Error);
       }
     },
   ),
@@ -36,12 +48,12 @@ passport.serializeUser((user, done) => {
   done(null, user.id);
 });
 
-passport.deserializeUser(async (_id: string, done) => {
+passport.deserializeUser(async (id: string, done) => {
   try {
-    const user = await authRepository.findById(_id);
-    done(null, user as unknown as Express.User);
+    const user = await authRepository.findById(id);
+    done(null, user ?? false);
   } catch (err) {
-    done(err, null);
+    done(err);
   }
 });
 

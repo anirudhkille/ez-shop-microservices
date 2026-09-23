@@ -4,18 +4,19 @@ import { AppError } from "../utils/appError";
 
 export const errorHandler = (
   err: Error,
-  req: Request,
+  _req: Request,
   res: Response,
   _next: NextFunction,
-) => {
+): void => {
   if (err instanceof AppError) {
-    return res.status(err.statusCode).json({
+    res.status(err.statusCode).json({
       success: false,
       message: err.message,
     });
+    return;
   }
 
-  logger.error(err.message);
+  logger.error(err.stack ?? err.message);
 
   res.status(500).json({
     success: false,

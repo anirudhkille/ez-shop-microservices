@@ -8,22 +8,19 @@ import { generateOtp } from "../utils/generateOtp";
 import { sendEmail } from "../utils/sendEmail";
 import { resetPasswordTemplate } from "../templates/resetEmailTemplate";
 import { verifyEmailTemplate } from "../templates/verifyEmailTemplate";
-import Session from "./session..model";
 import { AppError } from "../utils/appError";
 import * as authRepository from "../repository/auth.repository";
+import * as sessionRepository from "../repository/session.repository";
 import { IUser } from "../types/auth.types";
+import { comparePassword, hashPassword } from "../utils/bcrypt";
 
 const REFRESH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 const saveRefreshSession = async (userId: string, refreshToken: string) => {
-  await Session.findOneAndUpdate(
-    { key: `refresh:${userId}` },
-    {
-      value: refreshToken,
-      expiresAt: new Date(Date.now() + REFRESH_TTL_MS),
-    },
-    { upsert: true, new: true },
-  );
+  await sessionRepository.update(`refresh:${userId}`, {
+    value: refreshToken,
+    expiresAt: new Date(Date.now() + REFRESH_TTL_MS),
+  });
 };
 
 export const signUp = async (email: string, password: string) => {
@@ -33,10 +30,10 @@ export const signUp = async (email: string, password: string) => {
   }
 
   const otp = generateOtp();
-
-  await Session.create({
+  const hashedPassword=hashPassword(password)
+  await sessionRepository.create({
     key: `signup:${email}`,
-    value: JSON.stringify({ email, password, otp }),
+    value: JSON.stringify({ email, password:hashedPassword, otp }),
     expiresAt: new Date(Date.now() + 10 * 60 * 1000),
   });
 
@@ -50,7 +47,8 @@ export const signUp = async (email: string, password: string) => {
 };
 
 export const verifySignupOTP = async (email: string, otp: string) => {
-  const session = await Session.findOne({ key: `signup:${email}` });
+  const key = `signup:${email}`;
+  const session = await sessionRepository.findOne(key);
 
   if (!session) {
     throw new AppError("OTP expired", 400);
@@ -72,24 +70,24 @@ export const verifySignupOTP = async (email: string, otp: string) => {
     isEmailVerified: true,
   });
 
-  await session.deleteOne();
+  await sessionRepository.deleteOne(key);
 
   const accessToken = generateAccessToken({
-    _id: String(newUser._id),
+    _id: String(newUser.id),
     role: newUser.role,
   });
   const refreshToken = generateRefreshToken({
-    _id: String(newUser._id),
+    _id: String(newUser.id),
     role: newUser.role,
   });
 
-  await saveRefreshSession(String(newUser._id), refreshToken);
+  await saveRefreshSession(String(newUser.id), refreshToken);
 
   return {
     accessToken,
     refreshToken,
     user: {
-      id: newUser._id,
+      id: newUser.id,
       name: newUser.name,
       email: newUser.email,
     },
@@ -99,26 +97,33 @@ export const verifySignupOTP = async (email: string, otp: string) => {
 export const login = async (email: string, password: string) => {
   const user = await authRepository.findByEmail(email);
 
-  if (!user || !(await user.matchPassword(password))) {
+    if (!user || !user.password) {
     throw new AppError("Invalid credentials", 401);
   }
 
+   const isMatch = await comparePassword(password, user.password);
+
+  if (!isMatch) {
+    throw new AppError("Invalid credentials", 401);
+  }
+
+
   const accessToken = generateAccessToken({
-    _id: String(user._id),
+    _id: String(user.id),
     role: user.role,
   });
   const refreshToken = generateRefreshToken({
-    _id: String(user._id),
+    _id: String(user.id),
     role: user.role,
   });
 
-  await saveRefreshSession(String(user._id), refreshToken);
+  await saveRefreshSession(String(user.id), refreshToken);
 
   return {
     accessToken,
     refreshToken,
     user: {
-      id: user._id,
+      id: user.id,
       name: user.name,
       email: user.email,
       role: user.role,
@@ -135,7 +140,7 @@ export const forgotPassword = async (email: string) => {
 
   const otp = generateOtp();
 
-  await Session.create({
+  await sessionRepository.create({
     key: `reset:${email}`,
     value: otp,
     expiresAt: new Date(Date.now() + 10 * 60 * 1000),
@@ -155,7 +160,8 @@ export const resetPassword = async (
   otp: string,
   newPassword: string,
 ) => {
-  const session = await Session.findOne({ key: `reset:${email}` });
+  const key = `reset:${email}`;
+  const session = await sessionRepository.findOne(key);
 
   if (!session || session.value !== otp) {
     throw new AppError("Invalid or expired OTP", 400);
@@ -167,15 +173,15 @@ export const resetPassword = async (
     throw new AppError("User not found", 404);
   }
 
-  user.password = newPassword;
-  await user.save();
-  await session.deleteOne();
+   const hashedPassword=await hashPassword((newPassword))
+  await authRepository.update(user.id, { password: hashedPassword });
+  await sessionRepository.deleteOne(key);
 
   return { message: "Password reset successful" };
 };
 
 export const getProfile = async (userId: string) => {
-  const user = await authRepository.findById(userId, "-password");
+  const user = await authRepository.findById(userId);
 
   if (!user) {
     throw new AppError("User not found", 404);
@@ -199,13 +205,13 @@ export const updatePassword = async (
     throw new AppError("Cannot change password for OAuth accounts", 400);
   }
 
-  const isMatch = await user.matchPassword(currentPassword);
+  const isMatch = comparePassword(currentPassword,user.password);
   if (!isMatch) {
     throw new AppError("Current password is incorrect", 400);
   }
 
   user.password = newPassword;
-  await user.save();
+  await authRepository.update(userId, { password: newPassword });
 
   return { message: "Password updated successfully" };
 };
@@ -244,7 +250,8 @@ export const refreshToken = async (token: string) => {
     throw new AppError("Invalid refresh token", 403);
   }
 
-  const session = await Session.findOne({ key: `refresh:${decoded._id}` });
+  const key = `refresh:${decoded._id}`;
+  const session = await sessionRepository.findOne(key);
 
   if (!session || session.value !== token) {
     throw new AppError("Refresh token mismatch", 403);
@@ -257,22 +264,17 @@ export const refreshToken = async (token: string) => {
     decoded as unknown as { _id: string; role: string },
   );
 
-  session.value = newRefreshToken;
-  session.expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-  await session.save();
+  await sessionRepository.update(key, {
+    value: newRefreshToken,
+    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+  });
 
   return { accessToken: newAccessToken, refreshToken: newRefreshToken };
 };
 
 export const logout = async (token: string) => {
-  if (token) {
-    try {
-      const decoded = jwt.verify(token, env.JWT_REFRESH_SECRET) as JwtPayload;
-      await Session.findOneAndDelete({ key: `refresh:${decoded._id}` });
-    } catch {
-      // ignore
-    }
-  }
+  const decoded = jwt.verify(token, env.JWT_REFRESH_SECRET) as JwtPayload;
+  await sessionRepository.deleteOne(`refresh:${decoded._id}`);
 
   return { message: "Logged out successfully" };
 };
@@ -281,7 +283,7 @@ export const getAllUsers = async (page = 1, limit = 10) => {
   const skip = (page - 1) * limit;
 
   const [users, total] = await Promise.all([
-    authRepository.findAll(skip, limit, "-password"),
+    authRepository.findAll(skip, limit),
     authRepository.countDocuments(),
   ]);
 
@@ -297,7 +299,7 @@ export const getAllUsers = async (page = 1, limit = 10) => {
 };
 
 export const getUserById = async (id: string) => {
-  const user = await authRepository.findById(id, "-password");
+  const user = await authRepository.findById(id);
 
   if (!user) {
     throw new AppError("User not found", 404);
@@ -338,15 +340,15 @@ export const googleLogin = async (googleUser: {
   }
 
   const accessToken = generateAccessToken({
-    _id: String(user._id),
+    _id: String(user.id),
     role: user.role,
   });
   const refreshToken = generateRefreshToken({
-    _id: String(user._id),
+    _id: String(user.id),
     role: user.role,
   });
 
-  await saveRefreshSession(String(user._id), refreshToken);
+  await saveRefreshSession(String(user.id), refreshToken);
 
   return { accessToken, refreshToken, user };
 };

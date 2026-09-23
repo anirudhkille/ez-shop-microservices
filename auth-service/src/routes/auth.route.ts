@@ -35,7 +35,7 @@ router.get(
   passport.authenticate("google", { failureRedirect: "/auth/login-failed" }),
   googleLogin,
 );
-router.get("/login-failed", (req, res) => res.send("Google login failed"));
+router.get("/login-failed", (_req, res) => res.send("Google login failed"));
 router.get("/refresh", refreshToken);
 router.get("/profile", protect, getProfile);
 router.post("/signup", authLimiter, signUp);

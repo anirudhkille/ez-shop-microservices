@@ -18,8 +18,8 @@ const envSchema = z.object({
         .map((origin) => origin.trim())
         .filter(Boolean),
     ),
-  RATE_LIMIT_WINDOW_MS: z.number(),
-  RATE_LIMIT_MAX: z.number(),
+  RATE_LIMIT_WINDOW_MS: z.coerce.number(),
+  RATE_LIMIT_MAX: z.coerce.number(),
   CLIENT_URL: z.url(),
   ADMIN_URL: z.url(),
   AUTH_SERVICE_URL: z.url(),
